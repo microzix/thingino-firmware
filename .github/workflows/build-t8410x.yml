@@ -6,16 +6,29 @@ on:
 jobs:
   build:
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
 
     container:
       image: ghcr.io/themactep/thingino-builder-image:latest
       options: --user root
 
     steps:
-      - name: Checkout
+      - name: Checkout Thingino ciao
         uses: actions/checkout@v5
         with:
+          repository: themactep/thingino-firmware
+          ref: ciao
           submodules: recursive
+
+      - name: Enable USB NCM
+        run: |
+          CFG="configs/cameras/eufy_t8410x_t31x_sc3336_syn4343/eufy_t8410x_t31x_sc3336_syn4343_defconfig"
+
+          grep -q '^BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y$' "$CFG" || \
+            sed -i '/^BR2_PACKAGE_THINGINO_KOPT_DWC2_OTG=y$/a BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y' "$CFG"
+
+          echo "USB config:"
+          grep -E 'DWC2|USBNET' "$CFG"
 
       - name: Build T8410X
         run: |
@@ -23,10 +36,11 @@ jobs:
 
       - name: Find firmware
         run: |
-          find output -name "thingino-eufy_t8410x_t31x_sc3336_syn4343.bin" -print
+          find output -type f -name "thingino-eufy_t8410x_t31x_sc3336_syn4343.bin" -print
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: thingino-t8410x-usb
           path: output/**/images/thingino-eufy_t8410x_t31x_sc3336_syn4343.bin
+          if-no-files-found: error
