@@ -1,0 +1,31 @@
+name: Build T8410X USB Thingino
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+
+    container:
+      image: ghcr.io/themactep/thingino-builder-image:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Build T8410X
+        run: |
+          BOARD=eufy_t8410x_t31x_sc3336_syn4343 make fast WORKFLOW=1
+
+      - name: Find firmware
+        run: |
+          find output -name "thingino-eufy_t8410x_t31x_sc3336_syn4343.bin" -print
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: thingino-t8410x-usb
+          path: output/**/images/thingino-eufy_t8410x_t31x_sc3336_syn4343.bin
