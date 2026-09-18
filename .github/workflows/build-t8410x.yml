@@ -20,6 +20,10 @@ jobs:
           ref: ciao
           submodules: recursive
 
+      - name: Setup Git safe directory
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Enable USB NCM
         run: |
           CFG="configs/cameras/eufy_t8410x_t31x_sc3336_syn4343/eufy_t8410x_t31x_sc3336_syn4343_defconfig"
