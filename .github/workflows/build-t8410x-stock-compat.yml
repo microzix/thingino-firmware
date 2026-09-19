@@ -1,0 +1,219 @@
+name: Build T8410X stock-bcmdhd compatibility test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    container:
+      image: ghcr.io/themactep/thingino-builder-image:latest
+      options: --user root
+
+    steps:
+      - name: Checkout Thingino ciao
+        uses: actions/checkout@v5
+        with:
+          repository: themactep/thingino-firmware
+          ref: ciao
+          submodules: recursive
+
+      - name: Mark checkout safe for Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Configure stock-driver compatibility image
+        shell: bash
+        run: |
+          set -eux
+          BOARD=eufy_t8410x_t31x_sc3335_syn4343
+          CFG=configs/cameras/$BOARD/${BOARD}_defconfig
+          WIFI_INIT=package/wifi/files/S36wireless.in
+          WIFI_MK=package/wifi-syn4343/wifi-syn4343.mk
+          COMPAT=package/wifi-syn4343/files/eufy-bcm-stock-compat
+
+          # USB-NCM remains the recovery and test connection.
+          grep -q '^BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y$' "$CFG" || \
+            sed -i '/^BR2_PACKAGE_THINGINO_KOPT_DWC2_OTG=y$/a BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y' "$CFG"
+
+          # Do not automatically load Thingino's normal bcmdhd driver.
+          python3 - "$WIFI_INIT" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          marker = "Automatic WLAN start disabled for T8410X stock-driver test"
+          if marker not in text:
+              needle = 'start() {\n\techo -c 15 "Starting wireless interface"\n'
+              replacement = needle + (
+                  f'\n\techo "{marker}"\n'
+                  '\techo "Use USB-NCM. Load the stock driver only with the test command."\n'
+                  '\treturn 0\n'
+              )
+              if needle not in text:
+                  raise SystemExit("wireless init start function was not found")
+              path.write_text(text.replace(needle, replacement, 1))
+          PY
+
+          mkdir -p "$COMPAT"
+          python3 - "$COMPAT" <<'PY'
+          from pathlib import Path
+          import sys
+          from textwrap import dedent
+          directory = Path(sys.argv[1])
+          (directory / 'Makefile').write_text('obj-m += eufy_bcm_stock_compat.o\n')
+          (directory / 'eufy_bcm_stock_compat.c').write_text(dedent(r'''/*
+           * Compatibility shims required by Eufy's stock bcmdhd.ko.
+           * The stock module asks the board layer to power the SDIO radio and
+           * to provide the host-wake IRQ.  Thingino's generic driver contains
+           * that board layer internally, so this small module exposes it as
+           * the symbols expected by the stock module.
+           */
+          #include <linux/module.h>
+          #include <linux/kernel.h>
+          #include <linux/gpio.h>
+          #include <linux/delay.h>
+          #include <linux/interrupt.h>
+          #include <linux/mutex.h>
+
+          #define EUFY_WL_REG_ON     48  /* PB16 */
+          #define EUFY_WL_HOST_WAKE  39  /* PB07 */
+
+          static DEFINE_MUTEX(eufy_bcm_lock);
+          static int wl_requested;
+          static int wake_requested;
+
+          static int eufy_request_wl(void)
+          {
+              int ret = 0;
+
+              mutex_lock(&eufy_bcm_lock);
+              if (!wl_requested) {
+                  ret = gpio_request(EUFY_WL_REG_ON, "eufy-wl-reg-on");
+                  if (!ret)
+                      wl_requested = 1;
+              }
+              mutex_unlock(&eufy_bcm_lock);
+              return ret;
+          }
+
+          int bcm_wlan_power_on(int flag)
+          {
+              int ret = eufy_request_wl();
+
+              if (ret)
+                  return ret;
+
+              /* Match the vendor's slow, clean reset envelope.  PB18 must
+               * already be muxed to func1 by the test command before load. */
+              gpio_direction_output(EUFY_WL_REG_ON, 0);
+              msleep(200);
+              msleep(200);
+              gpio_set_value(EUFY_WL_REG_ON, 1);
+              msleep(200);
+              pr_notice("eufy-bcm-compat: WL_REG_ON high after 400 ms reset\n");
+              return 0;
+          }
+          EXPORT_SYMBOL(bcm_wlan_power_on);
+
+          int bcm_wlan_power_off(int flag)
+          {
+              if (wl_requested)
+                  gpio_set_value(EUFY_WL_REG_ON, 0);
+              msleep(200);
+              pr_notice("eufy-bcm-compat: WL_REG_ON low\n");
+              return 0;
+          }
+          EXPORT_SYMBOL(bcm_wlan_power_off);
+
+          int bcm_customer_wlan_get_oob_irq(void)
+          {
+              int ret = 0;
+
+              mutex_lock(&eufy_bcm_lock);
+              if (!wake_requested) {
+                  ret = gpio_request(EUFY_WL_HOST_WAKE, "eufy-wl-host-wake");
+                  if (!ret) {
+                      gpio_direction_input(EUFY_WL_HOST_WAKE);
+                      wake_requested = 1;
+                  }
+              }
+              mutex_unlock(&eufy_bcm_lock);
+              if (ret)
+                  return ret;
+              return gpio_to_irq(EUFY_WL_HOST_WAKE);
+          }
+          EXPORT_SYMBOL(bcm_customer_wlan_get_oob_irq);
+
+          static int __init eufy_bcm_compat_init(void)
+          {
+              pr_notice("eufy-bcm-compat: loaded; PB18 func1 is a required precondition\n");
+              return 0;
+          }
+
+          static void __exit eufy_bcm_compat_exit(void)
+          {
+              if (wl_requested) {
+                  gpio_set_value(EUFY_WL_REG_ON, 0);
+                  gpio_free(EUFY_WL_REG_ON);
+              }
+              if (wake_requested)
+                  gpio_free(EUFY_WL_HOST_WAKE);
+          }
+
+          module_init(eufy_bcm_compat_init);
+          module_exit(eufy_bcm_compat_exit);
+          MODULE_LICENSE("GPL");
+          MODULE_DESCRIPTION("Eufy stock bcmdhd board compatibility");
+          '''))
+          (directory / 'load-stock-bcmdhd').write_text(dedent('''#!/bin/sh
+          set -e
+          gpio-diag mode PB18 func1
+          sleep 1
+          insmod /lib/modules/$(uname -r)/extra/eufy_bcm_stock_compat.ko
+          echo "Compatibility layer loaded. Copy the private stock bcmdhd.ko to /tmp and then insmod it."
+          '''))
+          PY
+          chmod 0755 "$COMPAT/load-stock-bcmdhd"
+
+          python3 - "$WIFI_MK" <<'PY'
+          from pathlib import Path
+          import sys
+          from textwrap import dedent
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          marker = 'WIFI_SYN4343_EUFY_STOCK_COMPAT'
+          if marker not in text:
+              hook = dedent('''
+          # Build a deliberately separate helper for Eufy's private stock
+          # bcmdhd.ko.  The stock binary is not included in this image.
+          define WIFI_SYN4343_EUFY_STOCK_COMPAT_BUILD
+          	mkdir -p $(@D)/eufy-bcm-stock-compat
+          	cp -a $(WIFI_SYN4343_PKGDIR)/files/eufy-bcm-stock-compat/. $(@D)/eufy-bcm-stock-compat/
+          	$(TARGET_MAKE_ENV) $(MAKE) -C $(LINUX_DIR) M=$(@D)/eufy-bcm-stock-compat ARCH=$(KERNEL_ARCH) CROSS_COMPILE="$(TARGET_CROSS)" modules
+          endef
+          WIFI_SYN4343_POST_BUILD_HOOKS += WIFI_SYN4343_EUFY_STOCK_COMPAT_BUILD
+
+          define WIFI_SYN4343_EUFY_STOCK_COMPAT_INSTALL
+          	$(INSTALL) -D -m 0644 $(@D)/eufy-bcm-stock-compat/eufy_bcm_stock_compat.ko $(TARGET_DIR)/lib/modules/$(LINUX_VERSION_PROBED)/extra/eufy_bcm_stock_compat.ko
+          	$(INSTALL) -D -m 0755 $(WIFI_SYN4343_PKGDIR)/files/eufy-bcm-stock-compat/load-stock-bcmdhd $(TARGET_DIR)/usr/sbin/load-stock-bcmdhd
+          endef
+          WIFI_SYN4343_POST_INSTALL_TARGET_HOOKS += WIFI_SYN4343_EUFY_STOCK_COMPAT_INSTALL
+          ''')
+              anchor = '$(eval $(kernel-module))\n'
+              if anchor not in text:
+                  raise SystemExit('kernel-module anchor was not found')
+              text = text.replace(anchor, hook + '\n' + anchor, 1)
+              path.write_text(text)
+          PY
+
+      - name: Build firmware
+        run: |
+          BOARD=eufy_t8410x_t31x_sc3335_syn4343 make fast WORKFLOW=1
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: eufy-t8410x-stock-bcmdhd-compat
+          path: output/images/*
+          if-no-files-found: error
