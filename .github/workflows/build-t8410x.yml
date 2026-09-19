@@ -60,6 +60,7 @@ jobs:
           set -eux
 
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
             -e BOARD="${BOARD}" \
             -e BR2_DL_DIR=/work/dl \
             -e CI=true \
