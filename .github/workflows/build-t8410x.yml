@@ -1,4 +1,4 @@
-name: Build T8410X USB Thingino
+name: Build T8410X SC3335 USB Safe
 
 on:
   workflow_dispatch:
@@ -24,27 +24,83 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Enable USB NCM
+      - name: Configure safe T8410X diagnostic build
         run: |
-          CFG="configs/cameras/eufy_t8410x_t31x_sc3336_syn4343/eufy_t8410x_t31x_sc3336_syn4343_defconfig"
+          BOARD="eufy_t8410x_t31x_sc3335_syn4343"
+          CFG="configs/cameras/$BOARD/${BOARD}_defconfig"
+          WIFI_INIT="package/wifi/files/S36wireless.in"
+          WIFI_MK="package/wifi-syn4343/wifi-syn4343.mk"
 
           grep -q '^BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y$' "$CFG" || \
             sed -i '/^BR2_PACKAGE_THINGINO_KOPT_DWC2_OTG=y$/a BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y' "$CFG"
 
-          echo "USB config:"
-          grep -E 'DWC2|USBNET' "$CFG"
+          python3 - "$WIFI_INIT" <<'PY'
+          from pathlib import Path
+          import sys
 
-      - name: Build T8410X
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          marker = "Automatic WLAN start disabled for safe T8410X diagnostics"
+          if marker not in source:
+              needle = 'start() {\n\techo -c 15 "Starting wireless interface"\n'
+              replacement = (
+                  needle
+                  + f'\n\techo "{marker}"\n'
+                  + '\techo "Use USB-NCM and load bcmdhd manually only when instructed."\n'
+                  + '\treturn 0\n'
+              )
+              if needle not in source:
+                  raise SystemExit("Unable to locate wireless start function")
+              path.write_text(source.replace(needle, replacement, 1))
+          PY
+
+          python3 - "$WIFI_MK" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text().replace(
+              "gpio_wl_host_wake=39",
+              "gpio_wl_host_wake=50",
+          )
+          marker = "WIFI_SYN4343_T8410X_SAFE_DIAG_PATCH"
+          if marker not in source:
+              hook = "\n".join([
+                  "",
+                  "# T8410X newer board diagnostic: PB18/GPIO50 is the stock OOB pin.",
+                  "# Keep probe failures short to avoid repeated WLAN power cycling.",
+                  "define WIFI_SYN4343_T8410X_SAFE_DIAG_PATCH",
+                  "\\t$(SED) 's/int retry = POWERUP_MAX_RETRY;/int retry = 0;/g' $(@D)/dhd_linux.c",
+                  "\\t$(SED) 's/int retry = POWERUP_MAX_RETRY;/int retry = 0;/g' $(@D)/dhd_linux_platdev.c",
+                  "\\t$(SED) '/host_oob_irq = gpio_to_irq(gpio_wl_host_wake);/i \\\\tgpio_direction_input(gpio_wl_host_wake);' $(@D)/dhd_gpio.c",
+                  "endef",
+                  "",
+                  "WIFI_SYN4343_POST_PATCH_HOOKS += WIFI_SYN4343_T8410X_SAFE_DIAG_PATCH",
+                  "",
+              ])
+              anchor = "define WIFI_SYN4343_LINUX_CONFIG_FIXUPS\n"
+              if anchor not in source:
+                  raise SystemExit("Unable to locate SYN4343 patch anchor")
+              source = source.replace(anchor, hook + "\n" + anchor, 1)
+          path.write_text(source)
+          PY
+
+          echo "Board: $BOARD"
+          grep -E 'SENSOR_1_NAME|DWC2|USBNET' "$CFG"
+          grep -n 'Automatic WLAN start disabled' "$WIFI_INIT"
+          grep -E 'gpio_wl_host_wake|SAFE_DIAG' "$WIFI_MK"
+
+      - name: Build T8410X SC3335
         run: |
-          BOARD=eufy_t8410x_t31x_sc3336_syn4343 make fast WORKFLOW=1
+          BOARD=eufy_t8410x_t31x_sc3335_syn4343 make fast WORKFLOW=1
 
       - name: Find firmware
         run: |
-          find output -type f -name "thingino-eufy_t8410x_t31x_sc3336_syn4343.bin" -print
+          find output -type f -name "thingino-eufy_t8410x_t31x_sc3335_syn4343.bin" -print
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: thingino-t8410x-usb
-          path: output/**/images/thingino-eufy_t8410x_t31x_sc3336_syn4343.bin
+          name: thingino-t8410x-sc3335-usb-safe
+          path: output/**/images/thingino-eufy_t8410x_t31x_sc3335_syn4343.bin
           if-no-files-found: error
