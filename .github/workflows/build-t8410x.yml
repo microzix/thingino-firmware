@@ -1,4 +1,4 @@
-name: Build T8410X USB diagnostic firmware
+name: Build T8410X USB-safe diagnostic firmware
 
 on:
   workflow_dispatch:
@@ -9,11 +9,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-26.04
-    container: ghcr.io/themactep/thingino-builder-image:latest
 
     env:
-      BR2_DL_DIR: /home/ubuntu/dl
       BOARD: eufy_t8410x_t31x_sc3335_syn4343
+      BR2_DL_DIR: ${{ github.workspace }}/dl
 
     steps:
       - name: Checkout Thingino ciao source
@@ -22,12 +21,11 @@ jobs:
           repository: themactep/thingino-firmware
           ref: ciao
           submodules: recursive
-          fetch-depth: 1
 
-      - name: Add MMC diagnostic patch from this fork
+      - name: Add diagnostic kernel patch from this fork
+        shell: bash
         run: |
-          set -eu
-
+          set -eux
           git fetch --depth=1 \
             "https://github.com/${GITHUB_REPOSITORY}.git" \
             "${GITHUB_REF_NAME}"
@@ -36,32 +34,73 @@ jobs:
             FETCH_HEAD:package/all-patches/linux/3.10.14/0010-jzmmc-trace-sdio-probe.patch \
             > package/all-patches/linux/3.10.14/0010-jzmmc-trace-sdio-probe.patch
 
-          grep -F 'trace: request' \
+          grep -n 'trace:' \
             package/all-patches/linux/3.10.14/0010-jzmmc-trace-sdio-probe.patch
 
-      - name: Apply safe T8410X diagnostic settings
+      - name: Configure safe Wi-Fi diagnostic build
+        shell: bash
         run: |
-          set -eu
+          set -eux
 
-          CFG="configs/cameras/$BOARD/${BOARD}_defconfig"
-          WIFI_INIT="package/wifi/files/S36wireless.in"
-          WIFI_MK="package/wifi-syn4343/wifi-syn4343.mk"
-
-          test -f "$CFG"
-          test -f "$WIFI_INIT"
-          test -f "$WIFI_MK"
-
-          grep -q '^BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y$' "$CFG" || \
-            sed -i '/^BR2_PACKAGE_THINGINO_KOPT_DWC2_OTG=y$/a BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y' "$CFG"
-
-          python3 - "$WIFI_INIT" <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
-          import sys
 
-          path = Path(sys.argv[1])
-          source = path.read_text()
-          marker = "Automatic WLAN start disabled for safe T8410X diagnostics"
+          board = Path("configs/cameras/eufy_t8410x_t31x_sc3335_syn4343_defconfig")
+          text = board.read_text()
 
+          text = text.replace(
+              "gpio_wl_reg_on=48 gpio_wl_host_wake=39",
+              "gpio_wl_reg_on=48 gpio_wl_host_wake=39 retry_max_count=0",
+          )
+
+          board.write_text(text)
+          PY
+
+          # USB-NCM maradjon aktív; Wi-Fi ne induljon automatikusan.
+          sed -i \
+            's|^[[:space:]]*modprobe bcmdhd|# modprobe bcmdhd|' \
+            package/base-files/files/etc/init.d/S36wifi || true
+
+          grep -R -n \
+            'gpio_wl_reg_on=48\|gpio_wl_host_wake=39\|retry_max_count=0' \
+            configs/cameras/eufy_t8410x_t31x_sc3335_syn4343_defconfig
+
+      - name: Build firmware inside Thingino container
+        shell: bash
+        run: |
+          set -eux
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e BOARD="${BOARD}" \
+            -e BR2_DL_DIR=/work/dl \
+            -e CI=true \
+            -e GITHUB_ACTIONS=true \
+            -e WORKFLOW=1 \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            ghcr.io/themactep/thingino-builder-image:latest \
+            sh -lc 'make fast WORKFLOW=1'
+
+      - name: Verify diagnostic MMC module
+        shell: bash
+        run: |
+          set -eux
+
+          module="$(find output -path '*jzmmc_v12.ko' -type f | head -n 1)"
+          test -n "${module}"
+
+          echo "Checking ${module}"
+          strings "${module}" | grep 'trace:'
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: thingino-t8410x-sc3335-usb-safe-diagnostic
+          path: |
+            output/**/*.bin
+            output/**/*.img
+          if-no-files-found: error
           if marker not in source:
               needle = 'start() {\n\techo -c 15 "Starting wireless interface"\n'
               replacement = (
