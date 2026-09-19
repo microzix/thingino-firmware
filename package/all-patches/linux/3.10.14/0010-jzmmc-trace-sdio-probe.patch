@@ -1,27 +1,22 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Codex <codex@openai.com>
 Date: Fri, 19 Sep 2026 00:00:00 +0000
-Subject: [PATCH] jzmmc-trace-sdio-probe
+Subject: [PATCH] jzmmc: trace SDIO probe requests on MSC1
 
-The sysfs ``mmc 1`` interface reports a manual card-insert event even
-when it is not clear whether the MMC core subsequently dispatched SDIO
-enumeration commands.  Add concise MSC1-only notices at both boundaries:
-manual insertion and CMD0/CMD5 request dispatch.
-
-This makes a single controlled Wi-Fi reset/rescan sufficient to
-distinguish a missing MMC-core probe from an electrical/SDIO response
-failure, without requiring UART access.
+Trace the two points relevant to the Eufy T8410X Wi-Fi diagnosis:
+manual card-present notification and dispatch of SDIO CMD0/CMD5 on the
+second MMC controller. Limit the notices to MSC1 so normal SD-card
+traffic stays quiet.
 
 Signed-off-by: Codex <codex@openai.com>
 ---
- drivers/mmc/host/jzmmc_v12.c | 14 ++++++++++++++
- 1 file changed, 14 insertions(+)
+ drivers/mmc/host/jzmmc_v12.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
 
 diff --git a/drivers/mmc/host/jzmmc_v12.c b/drivers/mmc/host/jzmmc_v12.c
-index b758b78..0000000 100644
 --- a/drivers/mmc/host/jzmmc_v12.c
 +++ b/drivers/mmc/host/jzmmc_v12.c
-@@ -981,6 +981,13 @@ static void jzmmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
+@@ -977,6 +977,13 @@ static void jzmmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
  	host->mrq = mrq;
  	host->data = mrq->data;
  	host->cmd = mrq->cmd;
@@ -34,10 +29,10 @@ index b758b78..0000000 100644
 +			   msc_readl(host, IMASK));
  
  	if (host->data)
- 		dev_vdbg(host->dev, "op:%d arg:0x%08X sz:%uk\\n",
-@@ -1220,6 +1227,9 @@ int jzmmc_manual_detect(int index, int on)
+ 		dev_vdbg(host->dev, "op:%d arg:0x%08X sz:%uk\n",
+@@ -1200,6 +1207,9 @@ int jzmmc_manual_detect(int index, int on)
  	if (on) {
- 		dev_vdbg(host->dev, "card insert manually\\n");
+ 		dev_vdbg(host->dev, "card insert manually\n");
  		set_bit(JZMMC_CARD_PRESENT, &host->flags);
 +		if (host->index == 1)
 +			dev_notice(host->dev, "trace: manual insert flags=0x%lx\n",
@@ -45,5 +40,15 @@ index b758b78..0000000 100644
  #ifdef CLK_CTRL
  		jzmmc_clk_autoctrl(host, 1);
  #endif
+@@ -1503,6 +1513,9 @@ static ssize_t present_store(struct device *dev,
+ 
+ 	if (strnicmp(buf, "INSERT", 6) == 0) {
+ 		dev_info(host->dev, "card insert via sysfs\n");
++		if (host->index == 1)
++			dev_notice(host->dev, "trace: sysfs insert flags=0x%lx\n",
++				   host->flags);
+ 		set_bit(JZMMC_CARD_PRESENT, &host->flags);
+ 		mmc_detect_change(host->mmc, 0);
+ 
 -- 
 2.55.0
