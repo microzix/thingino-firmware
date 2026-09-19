@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           set -eux
+
           git fetch --depth=1 \
             "https://github.com/${GITHUB_REPOSITORY}.git" \
             "${GITHUB_REF_NAME}"
@@ -37,33 +38,21 @@ jobs:
           grep -n 'trace:' \
             package/all-patches/linux/3.10.14/0010-jzmmc-trace-sdio-probe.patch
 
-      - name: Configure safe Wi-Fi diagnostic build
+      - name: Verify selected camera configuration
         shell: bash
         run: |
           set -eux
 
-          python3 - <<'PY'
-          from pathlib import Path
+          test -f \
+            "configs/cameras/${BOARD}/${BOARD}_defconfig"
 
-          board = Path("configs/cameras/eufy_t8410x_t31x_sc3335_syn4343_defconfig")
-          text = board.read_text()
+          grep -n \
+            'BR2_PACKAGE_WIFI_SYN4343=y' \
+            "configs/cameras/${BOARD}/${BOARD}_defconfig"
 
-          text = text.replace(
-              "gpio_wl_reg_on=48 gpio_wl_host_wake=39",
-              "gpio_wl_reg_on=48 gpio_wl_host_wake=39 retry_max_count=0",
-          )
-
-          board.write_text(text)
-          PY
-
-          # USB-NCM maradjon aktív; Wi-Fi ne induljon automatikusan.
-          sed -i \
-            's|^[[:space:]]*modprobe bcmdhd|# modprobe bcmdhd|' \
-            package/base-files/files/etc/init.d/S36wifi || true
-
-          grep -R -n \
-            'gpio_wl_reg_on=48\|gpio_wl_host_wake=39\|retry_max_count=0' \
-            configs/cameras/eufy_t8410x_t31x_sc3335_syn4343_defconfig
+          grep -n \
+            'gpio_wl_reg_on=48 gpio_wl_host_wake=39' \
+            package/wifi-syn4343/wifi-syn4343.mk
 
       - name: Build firmware inside Thingino container
         shell: bash
@@ -71,7 +60,6 @@ jobs:
           set -eux
 
           docker run --rm \
-            --user "$(id -u):$(id -g)" \
             -e BOARD="${BOARD}" \
             -e BR2_DL_DIR=/work/dl \
             -e CI=true \
@@ -80,7 +68,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             ghcr.io/themactep/thingino-builder-image:latest \
-            sh -lc 'make fast WORKFLOW=1'
+            sh -lc 'BOARD="${BOARD}" make fast WORKFLOW=1'
 
       - name: Verify diagnostic MMC module
         shell: bash
