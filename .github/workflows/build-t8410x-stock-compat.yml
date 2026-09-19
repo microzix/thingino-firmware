@@ -215,5 +215,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eufy-t8410x-stock-bcmdhd-compat
-          path: output/images/*
+          path: output/**/images/*
           if-no-files-found: error
