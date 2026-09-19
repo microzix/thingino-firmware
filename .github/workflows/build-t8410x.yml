@@ -1,35 +1,58 @@
-name: Build T8410X SC3335 USB Safe
+name: Build T8410X USB diagnostic firmware
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    container: ghcr.io/themactep/thingino-builder-image:latest
 
-    container:
-      image: ghcr.io/themactep/thingino-builder-image:latest
-      options: --user root
+    env:
+      BR2_DL_DIR: /home/ubuntu/dl
+      BOARD: eufy_t8410x_t31x_sc3335_syn4343
 
     steps:
-      - name: Checkout Thingino ciao
+      # Innen jön a saját 0010 MMC-diagnosztikai patched.
+      - name: Checkout diagnostic files from this fork
+        uses: actions/checkout@v5
+        with:
+          path: diagnostics
+
+      # A stabil ciao alapot használjuk, de a saját patchedet ráhelyezzük.
+      - name: Checkout Thingino ciao source
         uses: actions/checkout@v5
         with:
           repository: themactep/thingino-firmware
           ref: ciao
           submodules: recursive
+          fetch-depth: 1
+          path: source
 
-      - name: Setup Git safe directory
+      - name: Add local MMC diagnostic patch
+        working-directory: source
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          set -eu
+          PATCH=../diagnostics/package/all-patches/linux/3.10.14/0010-jzmmc-trace-sdio-probe.patch
+          test -f "$PATCH"
+          cp "$PATCH" package/all-patches/linux/3.10.14/0010-jzmmc-trace-sdio-probe.patch
+          grep -F 'trace: request' package/all-patches/linux/3.10.14/0010-jzmmc-trace-sdio-probe.patch
 
-      - name: Configure safe T8410X diagnostic build
+      - name: Apply safe T8410X diagnostic settings
+        working-directory: source
         run: |
-          BOARD="eufy_t8410x_t31x_sc3335_syn4343"
+          set -eu
+
           CFG="configs/cameras/$BOARD/${BOARD}_defconfig"
           WIFI_INIT="package/wifi/files/S36wireless.in"
           WIFI_MK="package/wifi-syn4343/wifi-syn4343.mk"
+
+          test -f "$CFG"
+          test -f "$WIFI_INIT"
+          test -f "$WIFI_MK"
 
           grep -q '^BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y$' "$CFG" || \
             sed -i '/^BR2_PACKAGE_THINGINO_KOPT_DWC2_OTG=y$/a BR2_PACKAGE_USBNET_USB_DIRECT_NCM=y' "$CFG"
@@ -41,6 +64,7 @@ jobs:
           path = Path(sys.argv[1])
           source = path.read_text()
           marker = "Automatic WLAN start disabled for safe T8410X diagnostics"
+
           if marker not in source:
               needle = 'start() {\n\techo -c 15 "Starting wireless interface"\n'
               replacement = (
@@ -59,20 +83,16 @@ jobs:
           import sys
 
           path = Path(sys.argv[1])
-          source = path.read_text().replace(
-              "gpio_wl_host_wake=39",
-              "gpio_wl_host_wake=50",
-          )
+          source = path.read_text()
           marker = "WIFI_SYN4343_T8410X_SAFE_DIAG_PATCH"
+
           if marker not in source:
               hook = "\n".join([
                   "",
-                  "# T8410X newer board diagnostic: PB18/GPIO50 is the stock OOB pin.",
-                  "# Keep probe failures short to avoid repeated WLAN power cycling.",
+                  "# Keep failed Wi-Fi probes to one power-up attempt.",
                   "define WIFI_SYN4343_T8410X_SAFE_DIAG_PATCH",
                   "\t$(SED) 's/int retry = POWERUP_MAX_RETRY;/int retry = 0;/g' $(@D)/dhd_linux.c",
                   "\t$(SED) 's/int retry = POWERUP_MAX_RETRY;/int retry = 0;/g' $(@D)/dhd_linux_platdev.c",
-                  "\t$(SED) '/host_oob_irq = gpio_to_irq(gpio_wl_host_wake);/i gpio_direction_input(gpio_wl_host_wake);' $(@D)/dhd_gpio.c",
                   "endef",
                   "",
                   "WIFI_SYN4343_POST_PATCH_HOOKS += WIFI_SYN4343_T8410X_SAFE_DIAG_PATCH",
@@ -81,26 +101,36 @@ jobs:
               anchor = "define WIFI_SYN4343_LINUX_CONFIG_FIXUPS\n"
               if anchor not in source:
                   raise SystemExit("Unable to locate SYN4343 patch anchor")
-              source = source.replace(anchor, hook + "\n" + anchor, 1)
-          path.write_text(source)
+              path.write_text(source.replace(anchor, hook + "\n" + anchor, 1))
           PY
 
           echo "Board: $BOARD"
           grep -E 'SENSOR_1_NAME|DWC2|USBNET' "$CFG"
           grep -n 'Automatic WLAN start disabled' "$WIFI_INIT"
-          grep -E 'gpio_wl_host_wake|SAFE_DIAG' "$WIFI_MK"
+          grep -F 'gpio_wl_host_wake=39' "$WIFI_MK"
 
-      - name: Build T8410X SC3335
+      - name: Build firmware
+        working-directory: source
         run: |
-          BOARD=eufy_t8410x_t31x_sc3335_syn4343 make fast WORKFLOW=1
+          BOARD="$BOARD" make fast WORKFLOW=1
 
-      - name: Find firmware
+      - name: Verify compiled MMC diagnostic patch
+        working-directory: source
+        run: |
+          set -eu
+          MODULE="$(find output -type f -name jzmmc_v12.ko -print -quit)"
+          test -n "$MODULE"
+          strings "$MODULE" | grep -F 'trace: request'
+          strings "$MODULE" | grep -F 'trace: manual insert'
+
+      - name: Verify firmware image
+        working-directory: source
         run: |
           find output -type f -name "thingino-eufy_t8410x_t31x_sc3335_syn4343.bin" -print
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: thingino-t8410x-sc3335-usb-safe
-          path: output/**/images/thingino-eufy_t8410x_t31x_sc3335_syn4343.bin
+          name: thingino-t8410x-sc3335-usb-diagnostic
+          path: source/output/**/images/thingino-eufy_t8410x_t31x_sc3335_syn4343.bin
           if-no-files-found: error
